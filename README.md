@@ -29,6 +29,7 @@
 
 ## 快速上手
 <img width="1589" height="424" alt="image" src="https://github.com/user-attachments/assets/9cc53389-9bfa-487b-b59b-a3c87399c3cc" />
+
 ### 1. 下载安装包
 
 下载 `JianyanSetup_0.1.0.exe`（约 3.3GB），内含模型权重、Python 虚拟环境与可执行程序。
