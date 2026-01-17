@@ -2,6 +2,8 @@
 
 一款 Windows 端语音转文字工具。支持 NVIDIA 显卡本地部署，提供秒级响应。快捷键录音、本地 AI 转写、自动去口水词，一键粘贴到任意位置。
 
+<img width="1589" height="424" alt="image" src="https://github.com/user-attachments/assets/9cc53389-9bfa-487b-b59b-a3c87399c3cc" />
+
 ---
 
 ## 目录
