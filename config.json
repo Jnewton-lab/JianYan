@@ -1,0 +1,5 @@
+{
+  "hotkey": "ctrl+shift+space",
+  "max_seconds": 300,
+  "temp_dir": "temp"
+}

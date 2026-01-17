@@ -1,0 +1,489 @@
+﻿from __future__ import annotations
+
+import logging
+import threading
+from pathlib import Path
+from typing import Optional
+
+import pystray
+from PIL import Image, ImageDraw
+
+from api.llm import clean_text, preprocess_text
+from api.stt import preload_model, transcribe_audio
+from app.state import AppState
+from audio.recorder import Recorder, RecordingResult
+from hotkey.listener import start_hotkey_listener, stop_hotkey_listener
+from output.paste import write_clipboard, write_clipboard_and_paste
+from ui.llm_prompt import show_llm_auth_error_dialog, show_missing_llm_config_dialog
+from ui.settings import show_settings_window
+from utils.config import AppConfig, save_config
+from utils.notify import notify
+from utils.sounds import play_busy_sound, play_processing_sound, play_start_sound, play_stop_sound
+
+
+class TrayApp:
+    def __init__(self, state: AppState) -> None:
+        self.state = state
+        self._lock = threading.Lock()
+        self._timer: Optional[threading.Timer] = None
+        self._recorder = Recorder(max_seconds=state.config.max_seconds)
+        self._llm_prompt_open = False
+        self._settings_open = False
+        Path(state.config.temp_dir).mkdir(parents=True, exist_ok=True)
+
+        self._icons = {
+            "idle": _create_icon("#35a853"),
+            "recording": _create_icon("#d93025"),
+            "busy": _create_icon("#f9ab00"),
+        }
+        self.icon = pystray.Icon(
+            "audio_to_text",
+            self._icons["idle"],
+            "语音转文字",
+            menu=pystray.Menu(
+                pystray.MenuItem("开始/停止录音", self._on_toggle),
+                pystray.MenuItem(
+                    "复制原始文本",
+                    self._on_copy_raw,
+                    enabled=lambda item: bool(self.state.last_raw_text),
+                ),
+                pystray.MenuItem(
+                    "复制整理文本",
+                    self._on_copy_clean,
+                    enabled=lambda item: bool(self.state.last_clean_text),
+                ),
+                pystray.MenuItem("设置", self._on_settings),
+                pystray.MenuItem("退出", self._on_exit),
+            ),
+        )
+
+    def run(self) -> None:
+        logging.info("[TrayApp] 应用启动...")
+        try:
+            start_hotkey_listener(self.toggle_recording, self.state.config.hotkey)
+            logging.info("[TrayApp] 快捷键监听已启动: %s", self.state.config.hotkey)
+        except Exception as exc:
+            logging.exception("[TrayApp] 注册热键失败")
+            notify("快捷键错误", f"注册热键失败: {exc}")
+
+        if not self.state.model_ready and not self.state.model_error:
+            self._start_model_preload()
+        
+        logging.info("[TrayApp] 开始运行托盘图标...")
+        self.icon.run()
+
+    def toggle_recording(self) -> None:
+        logging.info("[TrayApp] toggle_recording 被调用")
+        logging.info("[TrayApp] 当前状态: is_recording=%s, is_busy=%s", 
+                     self.state.is_recording, self.state.is_busy)
+        with self._lock:
+            logging.info("[TrayApp] 获取锁成功")
+            if self.state.is_busy:
+                logging.info("[TrayApp] 状态为忙碌，播放忙碌音效")
+                play_busy_sound()
+                return
+            if not self.state.model_ready:
+                if self.state.model_error:
+                    notify("模型不可用", self.state.model_error)
+                else:
+                    notify("模型加载中", "请稍候再试")
+                play_busy_sound()
+                return
+            if not self.state.is_recording:
+                logging.info("[TrayApp] 开始录音...")
+                self._start_recording()
+            else:
+                logging.info("[TrayApp] 停止录音并处理...")
+                self._stop_and_process()
+        logging.info("[TrayApp] toggle_recording 完成")
+
+    def _start_recording(self) -> None:
+        logging.info("[TrayApp] _start_recording 进入")
+        if self.state.is_recording:
+            logging.warning("[TrayApp] 已经在录音中，跳过")
+            return
+        self.state.is_recording = True
+        try:
+            logging.info("[TrayApp] 调用 recorder.start()...")
+            self._recorder.start()
+            logging.info("[TrayApp] recorder.start() 完成")
+        except Exception as exc:
+            logging.exception("[TrayApp] 录音启动失败")
+            self.state.is_recording = False
+            notify("录音失败", str(exc))
+            return
+
+        self._update_icon()
+        logging.info("[TrayApp] 播放开始音效...")
+        play_start_sound()
+        self._timer = threading.Timer(self.state.config.max_seconds, self._auto_stop)
+        self._timer.daemon = True
+        self._timer.start()
+        logging.info("[TrayApp] 录音已开始，定时器已设置 (%ds)", self.state.config.max_seconds)
+
+    def _stop_and_process(self) -> None:
+        logging.info("[TrayApp] _stop_and_process 进入")
+        if not self.state.is_recording:
+            logging.warning("[TrayApp] 没有在录音，跳过")
+            return
+        self.state.is_recording = False
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+        logging.info("[TrayApp] 调用 recorder.stop()...")
+        result = self._recorder.stop()
+        logging.info("[TrayApp] recorder.stop() 完成, wav_bytes 大小: %d", 
+                     len(result.wav_bytes) if result.wav_bytes else 0)
+        self._update_icon()
+        play_stop_sound()
+
+        worker = threading.Thread(
+            target=self._process_recording,
+            args=(result,),
+            daemon=True,
+        )
+        worker.start()
+        logging.info("[TrayApp] 处理线程已启动")
+
+    def _auto_stop(self) -> None:
+        logging.info("[TrayApp] _auto_stop 被调用 (录音超时)")
+        with self._lock:
+            if self.state.is_recording:
+                self._stop_and_process()
+
+    def _process_recording(self, result: RecordingResult) -> None:
+        with self._lock:
+            self.state.is_busy = True
+        
+        # 开始处理 - 显示 0% 进度
+        self._update_progress(0.0)
+        play_processing_sound()
+
+        # ========== 阶段1: 语音转文字 (0% -> 57%) ==========
+        # 启动假进度动画 (7秒内从 0% 跑到 57%)
+        progress_stop = threading.Event()
+        progress_thread = threading.Thread(
+            target=self._animate_progress,
+            args=(0.0, 0.57, 7.0, progress_stop),
+            daemon=True
+        )
+        progress_thread.start()
+        
+        try:
+            raw_text = transcribe_audio(result.wav_bytes, result.temp_path, self.state.config).strip()
+            # 本地预处理：去除连续重复的标点符号
+            raw_text = preprocess_text(raw_text)
+            logging.info("[TrayApp] 转写完成, 原始文本: %s", raw_text[:200] if raw_text else "(空)")
+        except Exception as exc:
+            logging.exception("转写失败")
+            progress_stop.set()
+            notify("转写失败", str(exc))
+            with self._lock:
+                self.state.is_busy = False
+            self._update_icon()
+            return
+        finally:
+            progress_stop.set()
+            progress_thread.join(timeout=0.5)
+
+        # 转写完成 - 跳到 60%（留 3% 空隙）
+        self._update_progress(0.60)
+
+        with self._lock:
+            self.state.last_raw_text = raw_text or None
+
+        if not raw_text:
+            logging.warning("[TrayApp] 转写结果为空")
+            notify("转写完成", "未识别到有效文本")
+            with self._lock:
+                self.state.is_busy = False
+            self._update_icon()
+            return
+
+        # ========== 阶段2: AI 整理 (60% -> 97%) ==========
+        # 启动假进度动画 (3秒内从 60% 跑到 97%)
+        progress_stop = threading.Event()
+        progress_thread = threading.Thread(
+            target=self._animate_progress,
+            args=(0.60, 0.97, 3.0, progress_stop),
+            daemon=True
+        )
+        progress_thread.start()
+        
+        clean_text_result = raw_text
+        try:
+            clean_text_result = clean_text(raw_text, self.state.config).strip() or raw_text
+            logging.info("[TrayApp] LLM 整理完成, 结果: %s", clean_text_result[:200] if clean_text_result else "(空)")
+        except Exception as exc:
+            logging.exception("LLM 整理失败")
+            if "Missing Qwen Base URL or API Key" in str(exc):
+                self._handle_missing_llm_config()
+            elif "invalid_api_key" in str(exc) or "401" in str(exc):
+                self._handle_llm_auth_error(str(exc))
+            else:
+                notify("整理失败", str(exc))
+        finally:
+            progress_stop.set()
+            progress_thread.join(timeout=0.5)
+
+        # AI 整理完成 - 跳到 100%
+        self._update_progress(1.0)
+
+        with self._lock:
+            self.state.last_clean_text = clean_text_result
+        
+        # 阶段3: 粘贴
+        logging.info("[TrayApp] 开始写入剪贴板并粘贴...")
+        write_clipboard_and_paste(clean_text_result)
+        
+        logging.info("[TrayApp] 粘贴操作完成")
+        notify("转写完成", "文本已粘贴")
+
+        with self._lock:
+            self.state.is_busy = False
+        self._update_icon()
+        
+        # 刷新菜单，使"复制原始文本"和"复制整理文本"选项变为可用
+        try:
+            self.icon.update_menu()
+            logging.info("[TrayApp] 菜单已刷新")
+        except Exception as e:
+            logging.debug("[TrayApp] 刷新菜单失败: %s", e)
+
+    def _start_model_preload(self) -> None:
+        worker = threading.Thread(target=self._preload_model, daemon=True)
+        worker.start()
+
+    def _preload_model(self) -> None:
+        try:
+            preload_model()
+            self.state.model_ready = True
+            notify("模型就绪", "本地语音模型已加载完成")
+        except Exception as exc:
+            self.state.model_error = str(exc)
+            notify("模型加载失败", str(exc))
+    
+    def _animate_progress(self, start: float, end: float, duration: float, stop_event: threading.Event) -> None:
+        """假进度动画：在 duration 秒内从 start 跑到 end
+        
+        Args:
+            start: 起始进度 (0.0 - 1.0)
+            end: 结束进度 (0.0 - 1.0)
+            duration: 持续时间 (秒)
+            stop_event: 停止事件
+        """
+        import time
+        steps = int(duration * 10)  # 每 100ms 更新一次
+        step_size = (end - start) / steps
+        current = start
+        
+        for _ in range(steps):
+            if stop_event.is_set():
+                return
+            current += step_size
+            self._update_progress(min(current, end))
+            time.sleep(0.1)
+
+    def _on_toggle(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        self.toggle_recording()
+
+    def _on_copy_raw(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        if self.state.last_raw_text:
+            write_clipboard(self.state.last_raw_text)
+            notify("已复制", "原始文本已复制到剪贴板")
+
+    def _on_copy_clean(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        if self.state.last_clean_text:
+            write_clipboard(self.state.last_clean_text)
+            notify("已复制", "整理文本已复制到剪贴板")
+
+    def _on_settings(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        logging.info("[TrayApp] _on_settings 被调用")
+        if self.state.is_recording or self.state.is_busy:
+            logging.info("[TrayApp] 正在录音或处理中，无法打开设置")
+            notify("无法设置", "正在录音或处理中")
+            return
+
+        self._open_settings_window()
+
+    def _on_exit(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        stop_hotkey_listener()
+        if self.state.is_recording:
+            try:
+                self._recorder.stop()
+            except Exception:
+                logging.exception("停止录音失败")
+        icon.stop()
+
+    def _handle_missing_llm_config(self) -> None:
+        if self.state.config.suppress_missing_llm_prompt:
+            return
+        if self._llm_prompt_open:
+            return
+        self._llm_prompt_open = True
+        try:
+            dont_remind, open_settings = show_missing_llm_config_dialog()
+        finally:
+            self._llm_prompt_open = False
+        if dont_remind:
+            self.state.config.suppress_missing_llm_prompt = True
+            save_config(self.state.config)
+        if open_settings:
+            self._open_settings_window()
+
+    def _handle_llm_auth_error(self, message: str) -> None:
+        if self._llm_prompt_open:
+            return
+        self._llm_prompt_open = True
+
+        def _runner() -> None:
+            try:
+                show_llm_auth_error_dialog(message)
+            finally:
+                self._llm_prompt_open = False
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def _open_settings_window(self) -> None:
+        logging.info("[TrayApp] _open_settings_window 被调用, _settings_open=%s", self._settings_open)
+        if self._settings_open:
+            logging.info("[TrayApp] 设置窗口已打开，跳过")
+            return
+        self._settings_open = True
+
+        def _runner() -> None:
+            logging.info("[TrayApp] 设置窗口线程开始运行")
+            try:
+                new_config = show_settings_window(self.state.config)
+                logging.info("[TrayApp] 设置窗口已关闭，应用新配置")
+                self._apply_new_config(new_config)
+            except Exception as e:
+                logging.exception("[TrayApp] 设置窗口出错: %s", e)
+            finally:
+                self._settings_open = False
+                logging.info("[TrayApp] 设置窗口线程结束")
+
+        threading.Thread(target=_runner, daemon=True).start()
+        logging.info("[TrayApp] 设置窗口线程已启动")
+
+    def _apply_new_config(self, new_config: AppConfig) -> None:
+        if new_config == self.state.config:
+            return
+
+        self.state.config = new_config
+        save_config(new_config)
+        self._recorder = Recorder(max_seconds=new_config.max_seconds)
+        Path(new_config.temp_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            start_hotkey_listener(self.toggle_recording, new_config.hotkey)
+        except Exception as exc:
+            notify("快捷键错误", f"注册热键失败: {exc}")
+
+    def _update_icon(self) -> None:
+        """更新托盘图标（不获取锁，因为可能在锁内被调用）"""
+        # 直接读取状态，Python 的属性读取是原子的
+        is_recording = self.state.is_recording
+        is_busy = self.state.is_busy
+        
+        if is_recording:
+            self.icon.icon = self._icons["recording"]
+        elif is_busy:
+            self.icon.icon = self._icons["busy"]
+        else:
+            self.icon.icon = self._icons["idle"]
+    
+    def _update_progress(self, progress: float) -> None:
+        """更新进度图标 (0.0 - 1.0)"""
+        try:
+            self.icon.icon = _create_progress_icon(progress)
+        except Exception as e:
+            logging.debug("[TrayApp] 更新进度图标失败: %s", e)
+
+
+def _create_icon(color: str) -> Image.Image:
+    """创建纯色圆形图标"""
+    size = 64
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((8, 8, size - 8, size - 8), fill=color)
+    return image
+
+
+def _create_progress_icon(progress: float, size: int = 64) -> Image.Image:
+    """创建带有圆弧进度条的图标
+    
+    Args:
+        progress: 进度值 0.0 - 1.0
+        size: 图标尺寸
+    """
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    
+    # 外圈边距
+    margin = 4
+    # 进度条宽度 (粗圆弧，约占半径的三分之二)
+    arc_width = 18
+    
+    # 背景圆环 (灰色)
+    draw.ellipse(
+        (margin, margin, size - margin, size - margin),
+        outline="#3a3a3a",
+        width=arc_width
+    )
+    
+    # 内圆填充 (深色)
+    inner_margin = margin + arc_width
+    draw.ellipse(
+        (inner_margin, inner_margin, size - inner_margin, size - inner_margin),
+        fill="#2a2a2a"
+    )
+    
+    # 进度圆弧 (渐变色: 蓝->绿)
+    if progress > 0:
+        # 从顶部开始 (-90度)，顺时针方向
+        start_angle = -90
+        end_angle = start_angle + (progress * 360)
+        
+        # 根据进度变色: 0%-50% 蓝色渐变到青色, 50%-100% 青色渐变到绿色
+        if progress < 0.5:
+            # 蓝 -> 青
+            r = int(59 + (0 - 59) * (progress * 2))
+            g = int(130 + (200 - 130) * (progress * 2))
+            b = int(246 + (200 - 246) * (progress * 2))
+        else:
+            # 青 -> 绿
+            r = int(0 + (53 - 0) * ((progress - 0.5) * 2))
+            g = int(200 + (168 - 200) * ((progress - 0.5) * 2))
+            b = int(200 + (83 - 200) * ((progress - 0.5) * 2))
+        
+        progress_color = f"#{r:02x}{g:02x}{b:02x}"
+        
+        draw.arc(
+            (margin, margin, size - margin, size - margin),
+            start=start_angle,
+            end=end_angle,
+            fill=progress_color,
+            width=arc_width
+        )
+    
+    # 中心百分比文字
+    percent_text = f"{int(progress * 100)}"
+    
+    # 使用默认字体，调整位置使其居中
+    # 简单居中：对于2位数和3位数做不同处理
+    if len(percent_text) == 1:
+        text_x = size // 2 - 4
+    elif len(percent_text) == 2:
+        text_x = size // 2 - 7
+    else:
+        text_x = size // 2 - 10
+    text_y = size // 2 - 6
+    
+    draw.text((text_x, text_y), percent_text, fill="#ffffff")
+    
+    return image
+
+
+def run_tray(state: AppState) -> None:
+    TrayApp(state).run()
