@@ -1,8 +1,7 @@
 ﻿# 语音转文字工具（Windows）
 
 一款 Windows 端语音转文字工具。支持 NVIDIA 显卡本地部署，提供秒级响应。快捷键录音、本地 AI 转写、自动去口水词，一键粘贴到任意位置。
-
-<img width="1589" height="424" alt="image" src="https://github.com/user-attachments/assets/9cc53389-9bfa-487b-b59b-a3c87399c3cc" />
+![Cap 2026-01-17 at 18 09 13](https://github.com/user-attachments/assets/88a6460d-5f1c-4d3e-b942-bfaae3673d96)
 
 ---
 
@@ -29,7 +28,7 @@
 ---
 
 ## 快速上手
-
+<img width="1589" height="424" alt="image" src="https://github.com/user-attachments/assets/9cc53389-9bfa-487b-b59b-a3c87399c3cc" />
 ### 1. 下载安装包
 
 下载 `JianyanSetup_0.1.0.exe`（约 3.3GB），内含模型权重、Python 虚拟环境与可执行程序。
