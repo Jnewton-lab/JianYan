@@ -24,3 +24,4 @@ build.cmd
 scripts/clean_secrets.py
 scripts/convert_icon.py
 AGENTS.md
+private_files/

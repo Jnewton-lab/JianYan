@@ -18,7 +18,7 @@ OutputBaseFilename=JianyanSetup_{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 InfoBeforeFile=info_before.txt
 ; 不需要管理员权限
 PrivilegesRequired=lowest
